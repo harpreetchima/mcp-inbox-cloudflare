@@ -27,6 +27,8 @@ npx wrangler d1 execute DB --remote --command \
 
 `error` rows preserve the parsing failure reason. Queue messages retry three times before the configured dead-letter Queue.
 
+On Workers Free, both Queues retain messages for only 24 hours. Investigate the dead-letter Queue within that window. Raw MIME in R2 remains the durable recovery source; automatic replay from R2 is not implemented in this version.
+
 ## Credential rotation
 
 Rotate one agent at a time:
@@ -59,10 +61,11 @@ Before each deployment:
 
 ```bash
 npm ci
+npx wrangler whoami
 npm run check
 npm audit --audit-level=high
 npm run startup-check
 git diff --check
 ```
 
-Review Cloudflare binding changes carefully. A renamed D1, R2, or Queue binding can provision a new empty resource instead of attaching the existing one.
+Confirm that `whoami` shows the intended account. Review Cloudflare binding changes carefully: a renamed D1, R2, or Queue binding can provision or attach a new empty resource instead of the existing production resource.

@@ -43,34 +43,35 @@ Email is untrusted external input. MCP results repeat that warning so agents do 
 
 ## Quick start
 
-Requirements: Node.js 22 or newer, a Cloudflare account, and a domain using Cloudflare DNS.
+Requirements: Node.js 22.18 or a supported newer release, a Cloudflare account, an active R2 subscription, and a domain using Cloudflare DNS. The exact Node range is in `package.json`.
 
 ```bash
-npm install
+npm ci
 npx wrangler login
+npx wrangler whoami
 npm run check
-npm run deploy
-npx wrangler d1 migrations apply DB --remote
-npx wrangler secret put MCP_CODEX_TOKEN
-npx wrangler secret put MCP_HERMES_TOKEN
 ```
 
-Before deployment, replace `agents@example.com` in `wrangler.jsonc` with the one address you intend to receive. Use two different, high-entropy bearer tokens. Do not commit them to the repository.
+Before making DNS changes, check whether the domain already receives mail through another provider. Cloudflare Email Routing changes the domain's MX records and cannot share the same apex MX configuration with an external inbound provider.
 
-Then enable Email Routing for the domain and create one exact-address route whose action is the deployed Worker. Keep catch-all routing disabled unless broad domain intake is intentional. The complete sequence is in [docs/CLOUDFLARE_SETUP.md](docs/CLOUDFLARE_SETUP.md).
+The complete resource-creation, deployment, DNS-safety, credential, Email Routing, and end-to-end verification sequence is in [Self-hosting on Cloudflare](docs/CLOUDFLARE_SETUP.md). Follow it from the beginning for a new account.
 
 ## Agent configuration
 
 Codex:
 
 ```bash
-export AGENTS_MAIL_CODEX_TOKEN='replace-with-a-long-random-token'
+read -rsp 'Codex mailbox token: ' AGENTS_MAIL_CODEX_TOKEN
+echo
+export AGENTS_MAIL_CODEX_TOKEN
 codex mcp add agents_mail \
   --url https://YOUR-WORKER.YOUR-SUBDOMAIN.workers.dev/mcp \
   --bearer-token-env-var AGENTS_MAIL_CODEX_TOKEN
 ```
 
 Hermes:
+
+For Hermes's default profile, place the YAML in `~/.hermes/config.yaml` and provide `AGENTS_MAIL_HERMES_TOKEN` through an owner-readable `~/.hermes/.env` file.
 
 ```yaml
 mcp_servers:
@@ -83,13 +84,13 @@ mcp_servers:
       prompts: false
 ```
 
-Restart the agent after changing its environment or MCP configuration.
+Codex and Hermes are optional clients; this repository does not install either one. Restart an installed agent after changing its environment or MCP configuration. Any compatible Streamable HTTP MCP client can use the endpoint with one of the two bearer credentials.
 
 ## Cost
 
-At low message volume, this design is expected to fit within Cloudflare's free allowances: Email Routing is free, and Workers, D1, R2, and Queues each have free usage tiers. Check the current [Workers](https://developers.cloudflare.com/workers/platform/pricing/), [D1](https://developers.cloudflare.com/d1/platform/pricing/), [R2](https://developers.cloudflare.com/r2/pricing/), and [Queues](https://developers.cloudflare.com/queues/platform/pricing/) pricing before deploying.
+At low message volume, this design is expected to fit within Cloudflare's free allowances: Email Routing is free, and Workers, D1, R2, and Queues each have free usage tiers. R2 is metered beyond its allowance rather than hard-capped at $0. Check the current [Workers](https://developers.cloudflare.com/workers/platform/pricing/), [D1](https://developers.cloudflare.com/d1/platform/pricing/), [R2](https://developers.cloudflare.com/r2/pricing/), and [Queues](https://developers.cloudflare.com/queues/platform/pricing/) pricing before deploying.
 
-Outbound delivery is intentionally disabled. Cloudflare's arbitrary-recipient sending path requires a Workers Paid plan; see [Send emails from Workers](https://developers.cloudflare.com/email-routing/email-workers/send-email-workers/).
+Outbound delivery is intentionally disabled. Cloudflare's arbitrary-recipient sending path requires a Workers Paid plan; see [Email Service pricing](https://developers.cloudflare.com/email-service/platform/pricing/).
 
 ## Development
 
