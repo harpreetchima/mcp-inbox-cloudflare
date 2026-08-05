@@ -1,0 +1,56 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "agents-mail",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-04",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "preview_urls": false,
+  "vars": {
+    "MAILBOX_ADDRESS": "agents@example.com",
+    "OUTBOUND_EMAIL_ENABLED": "false"
+  },
+  "observability": {
+    "enabled": true,
+    "logs": {
+      "enabled": true,
+      "head_sampling_rate": 1,
+      "invocation_logs": true
+    },
+    "traces": {
+      "enabled": true,
+      "head_sampling_rate": 0.05
+    }
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "agents-mail",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "RAW_EMAILS"
+    }
+  ],
+  "queues": {
+    "producers": [
+      {
+        "binding": "INGEST_QUEUE",
+        "queue": "agents-mail-ingest"
+      }
+    ],
+    "consumers": [
+      {
+        "queue": "agents-mail-ingest",
+        "max_batch_size": 1,
+        "max_batch_timeout": 5,
+        "max_retries": 3,
+        "retry_delay": 60,
+        "dead_letter_queue": "agents-mail-ingest-dlq",
+        "max_concurrency": 1
+      }
+    ]
+  }
+}

@@ -1,0 +1,14 @@
+From: Example Notifications <notifications@example.net>
+Reply-To: support@example.net
+To: agents@example.com
+Date: Tue, 4 Aug 2026 10:00:00 -0700
+Message-ID: <{{MESSAGE_ID}}@example.net>
+In-Reply-To: <thread-root@example.net>
+References: <thread-root@example.net>
+Subject: {{SUBJECT}}
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+
+A new notification is available.
+
+View: https://example.net/notifications/{{MESSAGE_ID}}?source=email
