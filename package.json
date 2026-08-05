@@ -1,5 +1,5 @@
 {
-  "name": "agents-mail-cloudflare",
+  "name": "mcp-inbox-cloudflare",
   "version": "0.1.0",
   "private": true,
   "type": "module",

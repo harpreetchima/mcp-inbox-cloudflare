@@ -1,4 +1,4 @@
-# Agents Mail on Cloudflare
+# MCP Inbox for Cloudflare
 
 A small, agent-centric email inbox that runs entirely on Cloudflare. Incoming mail is stored and normalized, then exposed to authenticated agents through a stateless MCP endpoint.
 
