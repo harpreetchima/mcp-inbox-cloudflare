@@ -1,54 +1,76 @@
 # Self-hosting on Cloudflare
 
-This guide takes a fresh clone from no Cloudflare resources to a working inbound mailbox. Examples use `agents@example.com`; replace the domain and address with your own.
+A fresh clone needs five Cloudflare resources, two secret values that identify agents, and one email routing rule. After setup, Cloudflare receives and processes mail without a computer left online.
 
-After deployment, mail is received and processed entirely by Cloudflare. Your computer does not need to remain on, and neither Codex nor Hermes has to be installed on the deployment machine.
+The examples use `agents@example.com`. Replace that address and domain with your own.
 
-## What this setup creates
+> **Protect current mail delivery:** Cloudflare Email Routing changes the MX records that direct inbound mail. If another provider receives mail for the domain, use a dedicated subdomain such as `agents@inbox.example.com` or use another domain.
 
-| Resource | Default name | Purpose |
+## What this deployment creates
+
+| Resource | Name used in this guide | Job |
 | --- | --- | --- |
-| Worker | `agents-mail` | Receives email and serves the MCP endpoint. |
-| D1 database | `agents-mail` | Stores normalized message data and claim state. |
-| R2 bucket | `agents-mail-raw` | Privately stores original `.eml` messages. |
-| Queue | `agents-mail-ingest` | Runs parsing outside the inbound email request. |
-| Dead-letter Queue | `agents-mail-ingest-dlq` | Holds jobs that exhaust their retries. |
-| Email Routing rule | Your exact mailbox | Sends only that address to the Worker. |
+| Worker | `agents-mail` | Receives email and serves agent tools at `/mcp`. |
+| D1 database | `agents-mail` | Stores parsed message fields and claim state. |
+| R2 bucket | `agents-mail-raw` | Stores each original email as an `.eml` file with its headers and attachments. Keep public access off. |
+| Queue | `agents-mail-ingest` | Schedules message parsing. |
+| Dead-letter Queue | `agents-mail-ingest-dlq` | Holds jobs that exhaust retries after processing exceptions. |
+| Email Routing rule | Your exact mailbox | Sends that address to the Worker. |
 
-The binding names `DB`, `RAW_EMAILS`, and `INGEST_QUEUE` are application interfaces and should not be renamed. Resource names may be changed if they already exist in your account, but the corresponding values in `wrangler.jsonc` and the commands below must stay consistent.
+A binding is the name code uses for a Cloudflare resource. Keep the bindings `DB`, `RAW_EMAILS`, and `INGEST_QUEUE`. Resource names may differ, but the names in Wrangler configuration and maintenance commands must match.
 
-## Requirements and cost
+The checked-in `wrangler.jsonc` starts with draft D1 and R2 bindings. The creation commands below add account identifiers and the R2 bucket name. `agents-mail-raw` is a name chosen by this guide, not a bucket already attached by the template.
+
+## Requirements
 
 You need:
 
-- Node.js `^22.18.0` or `>=24.11.0`, plus npm. This matches the locked dependencies.
+- Node.js `^22.18.0` or `>=24.11.0`, plus npm. This is the supported range in `package.json`.
 - A Cloudflare account.
-- A domain in that account using Cloudflare authoritative DNS.
-- An active [R2 subscription](https://developers.cloudflare.com/r2/get-started/). Cloudflare may ask you to complete an R2 checkout even though R2 includes free monthly usage.
+- A domain in that account using Cloudflare as its authoritative DNS provider, meaning Cloudflare publishes the domain's DNS records.
+- An active [R2 subscription](https://developers.cloudflare.com/r2/get-started/). Cloudflare may ask you to complete the R2 activation flow before bucket creation.
 - Permission to create Workers, D1 databases, R2 buckets, Queues, Worker secrets, and Email Routing rules.
 
-For a low-volume inbox, this deployment is expected to remain inside the Workers Free allowances. Email Routing is available on the Free plan, and Workers, D1, R2, and Queues have free allowances. R2 is a usage-based subscription: Standard storage currently includes a monthly free allowance, then excess usage is billable rather than blocked. Review the current [Email Service](https://developers.cloudflare.com/email-service/platform/pricing/), [Workers](https://developers.cloudflare.com/workers/platform/pricing/), [D1](https://developers.cloudflare.com/d1/platform/pricing/), [R2](https://developers.cloudflare.com/r2/pricing/), and [Queues](https://developers.cloudflare.com/queues/platform/pricing/) pricing before deploying.
+## Cost and size limits
 
-Workers Paid and Email Sending are **not** required for this inbound-only setup. Sending replies to arbitrary recipients is a separate paid capability and remains disabled in this project.
+Low message volume may stay inside Cloudflare's free quotas. This is an estimate, not a price guarantee. Message count, message size, retention, and platform price changes affect the bill. R2 charges for usage above its allowance.
 
-Workers Free has lower CPU limits than Workers Paid. Small notification emails are the intended workload; if Worker logs show `EXCEEDED_CPU` while parsing large or complex messages, reduce message size or move the Worker to the Paid plan.
+Review current [Email Service](https://developers.cloudflare.com/email-service/platform/pricing/), [Workers](https://developers.cloudflare.com/workers/platform/pricing/), [D1](https://developers.cloudflare.com/d1/platform/pricing/), [R2](https://developers.cloudflare.com/r2/pricing/), and [Queues](https://developers.cloudflare.com/queues/platform/pricing/) prices before deployment.
 
-## 1. Check the domain before changing email DNS
+Inbound mail does not require Workers Paid. Mail to arbitrary recipients uses a separate paid path, and this project does not wire that path into the MCP server.
 
-Email Routing installs Cloudflare MX records on the domain. Those records determine where all inbound mail for that domain is delivered.
+Cloudflare Email Routing rejects inbound messages above 25 MiB. This project parses messages up to 5 MiB. A message above 5 MiB that reaches the Worker stays in R2 and gets a D1 `error` row. See [Email Service limits](https://developers.cloudflare.com/email-service/platform/limits/).
 
-If the domain already receives mail through Google Workspace, Microsoft 365, Fastmail, another provider, or a self-hosted mail server, stop before onboarding the apex domain. Cloudflare Email Routing cannot share the same apex MX configuration with an external inbound provider. Use a dedicated subdomain such as `agents@inbox.example.com`, or use a separate domain. A subdomain has its own onboarding flow; follow Cloudflare's [Email Routing subdomain instructions](https://developers.cloudflare.com/email-service/configuration/subdomains/) before creating the routing rule in step 9.
+## Command note for alternate Wrangler files
 
-Inspect the current records in **Cloudflare Dashboard → DNS → Records**, or from a terminal:
+Wrangler is Cloudflare's command-line tool for deployment and resource management. The commands below use the default `wrangler.jsonc`. If your account mapping lives in another complete configuration file, pass it to every Wrangler command. Wrangler files are complete configurations rather than overlays.
+
+Examples:
+
+```bash
+npm run deploy -- --config wrangler.production.jsonc
+npx wrangler d1 migrations apply DB --remote --config wrangler.production.jsonc
+npx wrangler tail agents-mail --config wrangler.production.jsonc
+```
+
+Keep one configuration path throughout setup and operations. Mixing the draft template with a production file can target an empty or unrelated resource.
+
+## 1. Check the domain before changing DNS
+
+An MX record names the servers that receive a domain's mail. The apex is the bare domain, such as `example.com`; a routing subdomain is a child such as `inbox.example.com`.
+
+If the apex already receives mail through Google Workspace, Microsoft 365, Fastmail, another provider, or your own mail server, do not onboard that apex to Email Routing. Cloudflare cannot share the same apex MX setup with another inbound provider.
+
+Inspect records in **Cloudflare Dashboard → DNS → Records**, or run:
 
 ```bash
 dig MX example.com +short
 dig TXT example.com +short
 ```
 
-Do not remove or replace records until you understand their current use. A domain must also have only one SPF record; if an existing SPF policy must remain, merge Cloudflare's include into it rather than publishing a second `v=spf1` record. See Cloudflare's [domain configuration](https://developers.cloudflare.com/email-service/configuration/domains/) documentation.
+Do not remove records until you know what uses them. A domain should publish one SPF policy, a TXT record that names permitted sending services. If the current policy must remain, merge Cloudflare's entry into it instead of publishing a second `v=spf1` record. Read Cloudflare's [domain configuration](https://developers.cloudflare.com/email-service/configuration/domains/) page before accepting DNS changes.
 
-## 2. Install and check the project
+## 2. Check the project and choose the mailbox
 
 From the repository root:
 
@@ -58,12 +80,9 @@ npm ci
 npx wrangler --version
 ```
 
-Expected results:
+The Node.js version must match `package.json`. Wrangler should report the version pinned in `package-lock.json`.
 
-- Node matches the supported range in `package.json`.
-- Wrangler reports the version pinned by this repository.
-
-Edit `MAILBOX_ADDRESS` in `wrangler.jsonc`:
+Set one exact address in the Wrangler configuration file you chose:
 
 ```jsonc
 "vars": {
@@ -72,14 +91,16 @@ Edit `MAILBOX_ADDRESS` in `wrangler.jsonc`:
 }
 ```
 
-Use one exact mailbox. Keep `OUTBOUND_EMAIL_ENABLED` set to `false`, and do not add a `send_email` binding for this setup. Then validate the configured project:
+Keep `OUTBOUND_EMAIL_ENABLED` set to `false`. The current MCP server has no sender wired into it, so changing this flag or adding a binding would not activate delivery by itself.
+
+Check the project:
 
 ```bash
 npm run typegen
 npm run check
 ```
 
-Type generation, type checking, linting, integration tests, and the deployment dry run should all pass.
+`npm run check` runs type checking, linting, local integration tests, and a deployment dry run against the tracked `wrangler.jsonc`. It does not validate another Wrangler file.
 
 ## 3. Authenticate to the intended account
 
@@ -88,11 +109,19 @@ npx wrangler login
 npx wrangler whoami
 ```
 
-Before continuing, confirm that `whoami` lists the account containing the domain you intend to use. If you belong to several Cloudflare accounts, copy the intended account ID shown by `whoami` and set `CLOUDFLARE_ACCOUNT_ID` for the setup shell, or add that `account_id` to your deployment configuration. All resources and the email domain must be created in the same account. Repeated login is not necessary when `whoami` already reports the correct authenticated user and account.
+Confirm that `whoami` lists the account that contains the domain. If it lists more than one account, copy the intended account ID into the complete configuration file you chose before creating resources:
 
-## 4. Create the Cloudflare resources
+```jsonc
+"account_id": "YOUR_ACCOUNT_ID"
+```
 
-The following commands create a deterministic set of resources. Run them once for a fresh deployment:
+This setting pins later commands to that account. The resources and email domain must belong to the same account. Do not rely on an account variable set only in the setup shell.
+
+Do not repeat `wrangler login` when `whoami` already reports the intended user and account.
+
+## 4. Create D1, R2, and the Queues
+
+Run these commands once for a fresh deployment:
 
 ```bash
 npx wrangler d1 create agents-mail --binding DB
@@ -101,11 +130,9 @@ npx wrangler queues create agents-mail-ingest
 npx wrangler queues create agents-mail-ingest-dlq
 ```
 
-The `--binding` options cause Wrangler to add the new D1 identifier and R2 bucket name to your working copy of `wrangler.jsonc`. This is expected. These values are account-specific resource identifiers, not passwords, but they connect a checkout to one deployment. Never copy identifiers from somebody else's deployment.
+The `--binding` options update the chosen configuration file with the D1 identifier and R2 bucket name. These values are not passwords, but they connect this checkout to resources in one account. Do not copy identifiers from another deployment.
 
-For a personal or private deployment fork, committing those resource identifiers makes future deployments reproducible for other operators. If you maintain a reusable public template, keep an account-specific `wrangler.production.jsonc` outside public source control, back it up securely, and pass `--config wrangler.production.jsonc` to Wrangler deployment and maintenance commands. Do not leave the only production mapping on one computer.
-
-Confirm that all four resources exist:
+Confirm that the four resources exist:
 
 ```bash
 npx wrangler d1 list
@@ -113,94 +140,104 @@ npx wrangler r2 bucket list
 npx wrangler queues list
 ```
 
-You should see the database, bucket, ingest Queue, and dead-letter Queue named above. If you chose different names, update every matching name in `wrangler.jsonc` before proceeding.
-
-Run the project check again after Wrangler updates the bindings:
+If you chose other resource names, update every matching value in the chosen configuration. Run the project check after the binding changes:
 
 ```bash
 npm run check
 ```
 
-Wrangler also supports automatic D1, R2, and Queue provisioning when draft bindings are deployed. This repository does not rely on that behavior in this guide because explicit creation makes the resulting resource names and retention command unambiguous.
+For another complete Wrangler file, run its deployment dry run too:
 
-## 5. Apply the database schema
+```bash
+npm run dry-run -- --config wrangler.production.jsonc
+```
+
+The output should name the intended Worker, bindings, and resources.
+
+## 5. Apply the D1 schema
+
+A migration is a versioned database change stored in `migrations/`. Apply the initial schema to the remote database:
 
 ```bash
 npx wrangler d1 migrations apply DB --remote
 ```
 
-Review the migration shown by Wrangler and confirm it. The output should report that `0001_initial.sql` was applied successfully.
+Review Wrangler's proposed migration before confirming it. The result should report that `0001_initial.sql` ran successfully.
 
-## 6. Deploy and record the Worker URL
+## 6. Deploy and check the Worker
 
 ```bash
 npm run deploy
 ```
 
-On a first Workers deployment, Cloudflare may ask you to register a `workers.dev` account subdomain. Accept that prompt so the MCP and health endpoints have a public HTTPS URL.
+Replace that command with `npm run deploy -- --config wrangler.production.jsonc` when you use the alternate file. Run one form, not both.
 
-Wrangler prints a URL resembling:
+On the first Workers deployment, Cloudflare may ask you to register a `workers.dev` account subdomain. Complete that prompt to receive a public HTTPS URL for `/health` and `/mcp`.
+
+Wrangler prints a URL like this:
 
 ```text
 https://agents-mail.YOUR-SUBDOMAIN.workers.dev
 ```
 
-Save the complete URL as your Worker URL. It can also be found later under the Worker's **Domains** tab in **Cloudflare Dashboard → Workers & Pages → agents-mail**; some dashboard layouts label this **Settings → Domains & Routes**.
+Save the URL. You can find it later under the Worker's **Domains** tab in **Cloudflare Dashboard → Workers & Pages → agents-mail**. Some dashboard versions place it under **Settings → Domains & Routes**.
 
-The health endpoint should now respond, even before agent credentials are installed:
+Check the public health route:
 
 ```bash
 curl --fail https://agents-mail.YOUR-SUBDOMAIN.workers.dev/health
 ```
 
-Expected JSON:
+Expected response:
 
 ```json
 {"ok":true,"service":"agents-mail"}
 ```
 
-## 7. Create two agent credentials
+This response proves that the Worker route answered. It does not test D1, R2, the Queue, Email Routing, or agent credentials.
 
-The Worker recognizes two fixed identities, `codex` and `hermes`, so it requires two different secrets even if you currently use only one client. A Hermes credential does not mean Hermes is installed; it merely reserves that identity for a future client.
+## 7. Create two bearer credentials
 
-Generate two independent 32-byte values with a password manager or, on a trusted terminal, run this command twice:
+The Worker recognizes two fixed identities: `codex` and `hermes`. It requires two different secret values, including when only one client is installed. A Hermes credential reserves an identity; it does not install Hermes.
+
+Generate two independent 32-byte values with a password manager or run this command twice on a trusted computer:
 
 ```bash
 openssl rand -hex 32
 ```
 
-Save the first value as the Codex credential and the second as the Hermes credential. Do not reuse a value. Enter them only at Wrangler's hidden prompts:
+Store one value for Codex and one for Hermes. Enter them at Wrangler's hidden prompts:
 
 ```bash
 npx wrangler secret put MCP_CODEX_TOKEN
 npx wrangler secret put MCP_HERMES_TOKEN
 ```
 
-Confirm that the secret **names**, but not their values, are present:
+List the secret names:
 
 ```bash
 npx wrangler secret list
 ```
 
-Expected names:
+The list should contain:
 
 - `MCP_CODEX_TOKEN`
 - `MCP_HERMES_TOKEN`
 
-Keep the matching client-side values in a password manager, operating-system secret store, or a file readable only by that user. Never put them in `wrangler.jsonc`, a URL, source control, or an MCP client's plain configuration field.
+Keep client copies in a password manager, operating-system secret store, or owner-readable environment file. Never put raw values in `wrangler.jsonc`, a URL, source control, or an MCP client's plain configuration field.
 
-With both secrets configured, an unauthenticated MCP request should fail closed with HTTP `401`:
+An unauthenticated request should return HTTP `401`:
 
 ```bash
 curl --output /dev/null --silent --write-out '%{http_code}\n' \
   https://agents-mail.YOUR-SUBDOMAIN.workers.dev/mcp
 ```
 
-This `401` verifies the unauthenticated boundary only. The authenticated `list_messages` check in step 11 must also succeed; that later check rejects missing, incorrect, or accidentally identical Worker secrets.
+This check proves the unauthenticated boundary. The authenticated `list_messages` check in step 11 tests the configured values and catches missing or identical secrets.
 
-## 8. Configure raw-message retention
+## 8. Set raw-message retention
 
-Add a lifecycle rule to delete raw messages under `raw/` after 180 days:
+An R2 lifecycle rule deletes objects after a chosen age. Install a rule for objects under `raw/`:
 
 ```bash
 npx wrangler r2 bucket lifecycle add agents-mail-raw \
@@ -208,43 +245,47 @@ npx wrangler r2 bucket lifecycle add agents-mail-raw \
   --expire-days 180
 ```
 
-Then verify it:
+Verify the rule:
 
 ```bash
 npx wrangler r2 bucket lifecycle list agents-mail-raw
 ```
 
-Cloudflare evaluates lifecycle expiration asynchronously, so an object can remain for a while after crossing the configured age. Normalized D1 rows do not expire automatically in this version.
+This rule is a manual setup step; it is not stored in `wrangler.jsonc`. Cloudflare evaluates expiration in the background, so an object may remain for a period after its 180th day. D1 rows have no automatic deletion policy.
 
-## 9. Enable Email Routing
+## 9. Set up Email Routing
 
-Use the dashboard for initial onboarding so you can inspect every DNS change before accepting it.
+Use the dashboard for initial setup so you can review each DNS change before accepting it.
 
 For an apex mailbox such as `agents@example.com`:
 
 1. Open **Cloudflare Dashboard → Compute → Email Service → Email Routing**.
-2. Select **Onboard Domain**, choose your domain, and review the proposed MX, SPF, and DKIM records.
-3. If the MX change would replace an existing inbound mail provider, cancel and return to step 1.
-4. Finish onboarding and wait for the domain status and DNS records to show as ready. DNS usually propagates in 5–15 minutes but can take up to 24 hours.
+2. Select **Onboard Domain** and choose the domain.
+3. Review the proposed MX and TXT records.
+4. Cancel if the MX change would replace a mail provider you still use.
+5. Complete onboarding and wait for Cloudflare to report the domain and DNS records as ready.
 
-For a subdomain mailbox such as `agents@inbox.example.com`, replace steps 2–4 above with this safer subdomain flow:
+For a routing subdomain such as `agents@inbox.example.com`:
 
-1. Select the apex domain entry in Email Routing.
+1. Select the apex domain in Email Routing.
 2. Open **Settings → Subdomains** and add `inbox`.
-3. Review and accept only the DNS records for that routing subdomain, then wait for it to become ready.
+3. Review records for that subdomain only.
+4. Accept them and wait for the subdomain to report ready.
 
-Then, for either path:
+Cloudflare may require one verified destination address before any routing rule can be created. Follow the dashboard prompt. That address satisfies account setup; the mailbox rule below still targets the Worker. See [Email Routing rules and addresses](https://developers.cloudflare.com/email-service/configuration/email-routing-addresses/).
 
-1. Open the configured domain's **Routing Rules** tab and select **Create routing rule**.
-2. Enter only the local part of the mailbox, such as `agents`, and select the intended apex domain or routing subdomain.
-3. Set **Action** to **Send to a Worker** and select `agents-mail`.
+After either domain path reports ready:
+
+1. Open the domain's **Routing Rules** tab and select **Create routing rule**.
+2. Enter the mailbox's local part, such as `agents`, and select the intended domain or routing subdomain.
+3. Set **Action** to **Send to a Worker** and choose `agents-mail`.
 4. Save the rule and confirm it is active.
-5. Leave the **Catch-all** rule disabled.
-6. Under Email Routing **Settings**, leave subaddressing disabled unless `agents+tag@example.com` should intentionally match this mailbox.
+5. Keep **Catch-all** off.
+6. Keep subaddressing off. The Worker accepts exact recipient equality, so `agents+tag@example.com` is rejected by this version.
 
-A verified destination email address is not required when the rule sends directly to a Worker.
+The Worker checks the exact recipient again after Email Routing invokes it.
 
-The current Wrangler email commands are open beta, but they are useful for read-only verification:
+You may inspect the configuration from a terminal:
 
 ```bash
 npx wrangler email routing settings example.com
@@ -252,61 +293,59 @@ npx wrangler email routing dns get example.com
 npx wrangler email routing rules list example.com
 ```
 
-The Worker performs its own exact-recipient check in addition to the Email Routing rule.
-
-After DNS reports ready, query the mailbox domain again:
+Query public DNS after Cloudflare reports ready:
 
 ```bash
 dig MX example.com +short
-# For a subdomain mailbox instead:
+# For a routing subdomain:
 dig MX inbox.example.com +short
 ```
 
-The chosen mailbox domain should return only Cloudflare's three routing hosts: `route1.mx.cloudflare.net`, `route2.mx.cloudflare.net`, and `route3.mx.cloudflare.net`. Do not send a test message while a stale external-provider MX record remains.
+Compare the result with the records shown by Cloudflare. Do not send a test message when an old provider's MX record still appears on the chosen mailbox domain.
 
-## 10. Verify a real incoming message
+## 10. Test a real incoming message
 
-First stream logs in one terminal:
+Stream logs in one terminal:
 
 ```bash
 npx wrangler tail agents-mail
 ```
 
-From a normal mail provider, send a harmless message to the configured mailbox. Use a generic subject such as `Test notification` and a body such as `This is a setup test.`
+From a normal mail provider, send a harmless message to the configured address. A generic subject such as `Test notification` and body such as `This is a setup test.` are enough.
 
-Within a few seconds, inspect D1 from another terminal:
+Inspect D1 from another terminal:
 
 ```bash
 npx wrangler d1 execute DB --remote --command \
   "SELECT id, subject, status, received_at FROM messages ORDER BY received_at DESC LIMIT 5"
 ```
 
-Success means:
+A complete test has four pieces of evidence:
 
-- Email Routing shows the delivery in its activity or routing logs.
-- Worker logs include `email_accepted` and do not include `ingest_failed`.
-- D1 contains one row for the test message, normally with status `new`.
-- Under **Cloudflare Dashboard → Storage & databases → R2 → agents-mail-raw → Objects**, the private bucket contains an object under `raw/YYYY-MM-DD/`.
+- **Cloudflare Dashboard → Compute → Email Service → Email Routing → your domain → Activity Log** records the message as `Handled`. See [Email logs](https://developers.cloudflare.com/email-service/observability/logs/).
+- Worker logs show `email_accepted` and no `ingest_failed` event for that message.
+- D1 contains one row, normally with status `new`.
+- **Cloudflare Dashboard → R2 object storage → agents-mail-raw → Objects** contains a key under `raw/YYYY-MM-DD/`. See [R2 objects](https://developers.cloudflare.com/r2/objects/).
 
-If the message reaches R2 but not D1, inspect the ingest Queue, dead-letter Queue, and `ingest_failed` logs. See [OPERATIONS.md](OPERATIONS.md) for the full troubleshooting runbook.
+If the file reaches R2 but D1 has no row, inspect the ingest Queue, dead-letter Queue, and `ingest_failed` logs. [Operations](OPERATIONS.md) gives symptom-based checks.
 
-On Workers Free, both the ingest Queue and dead-letter Queue retain messages for only 24 hours. Investigate failures within that window. Raw MIME in R2 is the durable recovery source; this version does not include an automatic replay command.
+Workers Free keeps Queue messages for 24 hours. Inspect failures inside that period. R2 holds the original message, but this version has no automatic replay command.
 
 ## 11. Connect an MCP client
 
-The MCP endpoint is:
+The endpoint is:
 
 ```text
 https://agents-mail.YOUR-SUBDOMAIN.workers.dev/mcp
 ```
 
-It uses Streamable HTTP and requires `Authorization: Bearer YOUR_TOKEN`. Codex and Hermes are optional clients; this repository does not install either one.
+It uses Streamable HTTP, an MCP transport over HTTPS, and requires `Authorization: Bearer YOUR_TOKEN`. Codex and Hermes are optional. Any compatible MCP client may use one of the two credentials.
 
-Whichever client you configure, require one successful `list_messages` call before considering authentication complete. A configuration HTTP `500` means the two Worker secrets are missing or identical; set two distinct values before continuing.
+Require one successful `list_messages` call before treating authentication as complete. HTTP `401` means the credential did not match. A configuration HTTP `500` means the Worker secrets are missing or identical.
 
 ### Codex
 
-Make the same value stored as `MCP_CODEX_TOKEN` available to the Codex process without placing the value in the Codex configuration. In Bash, this prompts without echoing the token or adding it to shell history:
+Make the Codex value available to the Codex process without placing it in `config.toml`:
 
 ```bash
 read -rsp 'Codex mailbox token: ' AGENTS_MAIL_CODEX_TOKEN
@@ -320,19 +359,23 @@ codex mcp add agents_mail \
 codex mcp get agents_mail --json
 ```
 
-The `export` lasts only for that shell and its child processes. For persistent use, provide `AGENTS_MAIL_CODEX_TOKEN` through the secret mechanism used to launch Codex. Do not paste the raw token into `config.toml`.
-
-Restart Codex, list the available MCP tools, then call `list_messages`. The test message should appear.
+The exported value lasts for that shell and its child processes. For persistent use, load it from a password manager, operating-system secret store, or owner-readable environment file when Codex starts. Restart Codex after configuration changes, then call `list_messages` and confirm that the test message appears.
 
 ### Hermes
 
-If Hermes is installed with its default profile, put the value stored as `MCP_HERMES_TOKEN` in `~/.hermes/.env`:
+If Hermes is installed with its default profile, put the Hermes value in `~/.hermes/.env`:
 
 ```dotenv
 AGENTS_MAIL_HERMES_TOKEN=replace-with-the-hermes-token
 ```
 
-Restrict that file to its owner, for example with `chmod 600 ~/.hermes/.env`. Add the following to `~/.hermes/config.yaml`:
+Restrict the file to its owner:
+
+```bash
+chmod 600 ~/.hermes/.env
+```
+
+Add this server to `~/.hermes/config.yaml`:
 
 ```yaml
 mcp_servers:
@@ -345,32 +388,40 @@ mcp_servers:
       prompts: false
 ```
 
-Restart Hermes or reload its MCP configuration, then call `list_messages`. A non-default profile uses that profile's corresponding environment and configuration files. If Hermes is not installed, skip this client step; the Cloudflare inbox continues to receive and store mail.
+Restart Hermes or reload its MCP configuration, then call `list_messages`. A profile other than the default uses that profile's environment and configuration files. Skip this client section when Hermes is not installed; Cloudflare continues to receive and store mail.
 
-Any other Streamable HTTP MCP client can connect with one of the two bearer credentials. The credential determines the actor identity and claim ownership; a client-supplied name does not.
+The credential fixes claim ownership as `codex` or `hermes`. A client-supplied name cannot change it.
 
-## Final setup checklist
+## Final check
 
-- [ ] `MAILBOX_ADDRESS` contains one intended address.
+- [ ] `MAILBOX_ADDRESS` contains one exact address.
 - [ ] `OUTBOUND_EMAIL_ENABLED` remains `false`.
-- [ ] `wrangler whoami` shows the account containing the domain.
+- [ ] Every Wrangler command used the intended complete configuration file.
+- [ ] `wrangler whoami` shows the account that owns the domain; a multi-account configuration contains that `account_id`.
 - [ ] D1, R2, the ingest Queue, and the dead-letter Queue exist.
-- [ ] D1 migration `0001_initial.sql` is applied.
-- [ ] The Worker health endpoint returns `ok: true`.
-- [ ] Both distinct Worker secret names are present.
-- [ ] An authenticated `list_messages` call succeeds, proving the secrets are configured and distinct.
-- [ ] The R2 `raw/` lifecycle rule is present.
-- [ ] Email Routing DNS is ready.
+- [ ] D1 migration `0001_initial.sql` ran on the remote database.
+- [ ] `/health` returns `ok: true`.
+- [ ] Both Worker secret names exist and their values differ.
+- [ ] The manual R2 lifecycle rule exists.
+- [ ] Email Routing reports ready for the mailbox domain.
 - [ ] One exact-address rule sends to `agents-mail`.
-- [ ] Catch-all and unintended subaddressing are disabled.
-- [ ] A real generic test message appears in D1 and through MCP.
+- [ ] Catch-all and subaddressing are off.
+- [ ] One generic test message appears in D1 and R2.
+- [ ] An authenticated `list_messages` call returns that message.
 
-At that point, setup is complete. Future email processing happens on Cloudflare; local tooling is needed only for deployments and maintenance.
+Mail processing now runs on Cloudflare. A computer is needed only for deployments, maintenance, and agent access.
+
+## Publishing a reusable template — optional
+
+Account identifiers in Wrangler configuration are not passwords, but they bind a checkout to one deployment.
+
+For a personal or private deployment, committing those identifiers can make later deployments repeatable for trusted operators. For a public template, keep a complete account file such as `wrangler.production.jsonc` outside source control, back it up in protected storage, and pass `--config` on every Wrangler command. Do not leave the only production mapping on one computer.
 
 ## Official references
 
 - [Route emails with Cloudflare Email Service](https://developers.cloudflare.com/email-service/get-started/route-emails/)
 - [Email Routing rules and addresses](https://developers.cloudflare.com/email-service/configuration/email-routing-addresses/)
 - [Email Service domain and DNS configuration](https://developers.cloudflare.com/email-service/configuration/domains/)
+- [Email Service limits](https://developers.cloudflare.com/email-service/platform/limits/)
 - [Wrangler commands](https://developers.cloudflare.com/workers/wrangler/commands/)
 - [R2 lifecycle rules](https://developers.cloudflare.com/r2/buckets/object-lifecycles/)

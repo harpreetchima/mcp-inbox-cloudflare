@@ -1,55 +1,70 @@
 # Architecture
 
+One Cloudflare Worker handles incoming email, queued parsing jobs, and authenticated HTTP requests. The surrounding Cloudflare services store the original message and its parsed record.
+
 ## Scope
 
-The service is a single-purpose inbox for software agents. It receives mail, preserves the original, normalizes a small useful subset, and exposes work through authenticated MCP tools. It does not provide a webmail UI, mailbox administration UI, spam-classification system, or outbound campaign service.
+This project serves one mailbox to software agents through Model Context Protocol (MCP), a standard interface for tools and data. It preserves each original message, extracts a small set of useful fields, and tracks which agent claimed the work.
 
-## Components
+The project has no webmail screen, mailbox administration screen, spam classifier, outbound campaign service, or automatic recovery command.
 
-- **Email Routing** accepts an exact configured address and invokes the Worker.
-- **Worker email handler** validates the envelope recipient and streams the original message to R2.
-- **R2** stores private RFC 822 source messages under `raw/YYYY-MM-DD/<uuid>.eml`.
-- **Queue** separates SMTP acceptance from parsing and retries transient failures.
-- **Worker queue handler** parses messages with PostalMime and writes normalized fields to D1.
-- **D1** stores message metadata, text, links, state, ownership, and threading identifiers.
-- **Stateless MCP endpoint** authenticates each request and offers five mailbox tools.
+## Message path
 
-## Message state
+| Component | Job |
+| --- | --- |
+| Email Routing | Sends one configured address to the Worker. |
+| Worker email handler | Checks the envelope recipient—the address used for delivery—and writes the original message to R2. |
+| R2 | Stores a `.eml` file under `raw/YYYY-MM-DD/<uuid>.eml`. The file keeps the message headers, content parts, and attachments; public bucket access should stay off. |
+| Queue | The inbound handler sends a parsing job before it returns. A separate Queue consumer handles the job. Processing exceptions receive up to three retries. |
+| Worker queue handler | Decodes the email with PostalMime, the project's parsing library, and writes selected fields to D1. |
+| D1 | Stores message fields, thread fields, work status, claim owner, and claim times. |
+| `/mcp` endpoint | Authenticates each request and exposes five mailbox tools over Streamable HTTP. |
+
+```text
+email -> Worker -> R2 -> Queue -> Worker -> D1 -> /mcp -> agent
+```
+
+## Message state and claim ownership
 
 ```text
 new -> claimed -> completed
-         |
-         +-> new after the 30-minute lease expires and another agent claims it
 
 parse failure -> error
 ```
 
-Claiming is one `UPDATE ... RETURNING` statement in D1. The authenticated bearer token, not a client-provided name, determines whether the actor is `codex` or `hermes`.
+`claim_next_message` runs one `UPDATE ... RETURNING` statement in D1. It selects the oldest `new` message or a `claimed` message whose 30-minute claim has expired. An expired row keeps the `claimed` status until the next claim overwrites its owner and times. The first owner may still complete it before another agent takes the claim.
 
-## Stored fields
+The bearer credential identifies the actor as `codex` or `hermes`. A name supplied by a client cannot change claim ownership.
 
-D1 contains envelope addresses, sender and reply address, subject, normalized message IDs, references, thread ID, timestamp, plain-text body, extracted HTTP(S) links, parse status, and claim state. Body text is capped at 500,000 characters and extracted links at 200.
+## Stored data and limits
 
-R2 retains the complete raw message, including MIME structure and attachments. Raw objects are not exposed through MCP in this version. Messages larger than 5 MiB remain in R2 but receive an `error` row instead of being parsed into memory.
+| Store | Contents | Limit |
+| --- | --- | --- |
+| D1 | Envelope addresses, sender, reply address, subject, message IDs, thread ID, dates, plain text, HTTP(S) links, parse result, and claim state. | Body text is cut at 500,000 characters. Link extraction stops at 200. |
+| R2 | Complete original message in `.eml` form, including attachments. | The MCP tools do not expose raw objects. |
 
-## Threading and replies
+Messages larger than 5 MiB stay in R2 and receive an `error` row; the queue handler does not load them into memory. Cloudflare rejects inbound mail above its 25 MiB platform limit before the Worker runs. For messages at or below 5 MiB, the Worker computes a SHA-256 content fingerprint from the raw bytes. The database suppresses a second normalized row only when that fingerprint is identical. Delivery servers may add headers such as `Received`, which changes the raw bytes and fingerprint. Oversized messages have no fingerprint, so repeated delivery may produce more than one `error` row. See [Email Service limits](https://developers.cloudflare.com/email-service/platform/limits/).
 
-The parser stores `Message-ID`, `In-Reply-To`, and `References`. `reply_to_message` chooses the stored `Reply-To`, then `From`, then envelope sender, and builds `In-Reply-To` and `References` headers.
+## Threaded replies
 
-The default deployment has no `send_email` binding and sets `OUTBOUND_EMAIL_ENABLED=false`. The send function exists for a later paid deployment, but the current tool returns the prepared reply without transmitting it.
+The parser stores `Message-ID`, `In-Reply-To`, and `References`. `reply_to_message` addresses the stored `Reply-To`, then `From`, then envelope sender. It constructs `In-Reply-To` and `References` headers from the source message.
 
-## Authentication and trust boundary
+The current MCP server prepares that reply and returns `OUTBOUND_DISABLED`; it never passes an email sender to the tool. Turning on delivery requires a code change that supplies a sender, a `send_email` binding, `OUTBOUND_EMAIL_ENABLED=true`, and Cloudflare's paid path for mail to arbitrary recipients. Changing the flag or binding alone does not send mail.
 
-There are two independent bearer-token secrets. The Worker hashes the provided and configured values and uses timing-safe comparison. Missing or identical configured tokens fail closed.
+## Authentication and untrusted input
 
-The health endpoint is public. `/mcp` requires authentication. R2 is private, D1 is not publicly reachable, and the project exposes no browser inbox.
+The Worker stores two bearer-token secrets. It hashes the supplied token and both configured tokens, then uses a comparison whose runtime does not depend on the first differing byte. Missing or identical configured secrets return a configuration error without mailbox data.
 
-Email bodies, headers, and links are adversarial input. Tool descriptions and results explicitly label them as untrusted data.
+The public `/health` route reports only the service name and process response. It does not test D1, R2, the Queue, Email Routing, or either credential. `/mcp` requires authentication. The application exposes no R2 object route or public D1 route. Keep R2 public access off. The project exposes no browser inbox.
 
-## Deliberate tradeoffs
+Email bodies, headers, and links may contain hostile instructions. Successful MCP results that carry message data repeat a warning to treat those fields as data.
 
-The inbound handler writes R2 and then enqueues a parsing task. If R2 succeeds but Queue submission fails, the raw object can be orphaned. R2 event notifications could close this dual-write gap, but add deployment and local-test complexity. The current design favors the smallest reproducible system; the production lifecycle rule eventually removes an orphan.
+## Known gaps and chosen limits
 
-Duplicate deliveries may create more than one raw object, but the unique raw SHA-256 constraint prevents duplicate normalized D1 messages. The extra raw objects expire under the lifecycle policy.
+| Condition | Result | Current response |
+| --- | --- | --- |
+| R2 write succeeds and Queue submission fails | A raw object has no parsing job. | The 180-day lifecycle rule in the setup guide removes it after the operator installs that rule. There is no automatic replay. |
+| Byte-identical raw content arrives more than once | Each delivery writes a raw object. | The content hash suppresses a second normalized row for content at or below 5 MiB. If installed, the lifecycle rule later removes extra raw objects. |
+| Normalized records age | D1 rows continue to accumulate. | D1 has no automatic deletion policy. Add one after choosing a retention requirement. |
 
-Normalized D1 rows currently have no automatic retention policy. Add one only when a concrete retention requirement is known.
+[R2 event notifications](https://developers.cloudflare.com/r2/buckets/event-notifications/) can send a Queue event after an object changes. They could remove the gap between the file write and Queue submission, but they would add another deployment path and more test work. The present design keeps that tradeoff visible.

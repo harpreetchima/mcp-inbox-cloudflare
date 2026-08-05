@@ -1,49 +1,58 @@
 # MCP Inbox for Cloudflare
 
-A small, agent-centric email inbox that runs entirely on Cloudflare. Incoming mail is stored and normalized, then exposed to authenticated agents through a stateless MCP endpoint.
+Email sent to one address becomes a private work queue that Codex, Hermes, or another software agent can read through Model Context Protocol (MCP). Cloudflare receives and stores each accepted message, then parses messages within the project's size limit.
 
-No local daemon or always-on computer is required. Local files are only source code, tests, and deployment tooling.
+You deploy this project in your own Cloudflare account. The inbox stays live without a local computer; an agent must run when you want it to act on mail. This is not a hosted service or webmail application.
 
-## What it does
+## What you get
 
-- Receives one exact address through Cloudflare Email Routing.
-- Stores the original RFC 822 message privately in R2.
-- Parses useful metadata, plain text, links, and threading headers into D1.
-- Uses a Queue to keep parsing outside the inbound email request.
-- Lets Codex and Hermes independently list, read, claim, and complete messages over MCP.
-- Builds correctly threaded replies while leaving outbound delivery disabled by default.
+- Email Routing sends one exact address to the Worker.
+- R2 stores each original email as an `.eml` file, including its headers and attachments; public bucket access should stay off.
+- D1 records structured message fields and work status.
+- A Cloudflare Queue schedules parsing after the original email has been stored.
+- The MCP endpoint exposes five authenticated tools for reading and processing mail.
+- The reply tool prepares text with standard email thread headers. The current version does not send it.
 
-This is deliberately not a webmail application. Cloudflare's dashboards expose infrastructure and logs, but there is no human inbox UI in this project.
+Cloudflare exposes service settings and logs in its dashboard. This project does not include a human inbox screen.
 
-## Data flow
+## How a message moves
 
 ```text
 Internet email
-    -> Cloudflare Email Routing (one exact address)
-    -> Worker email handler
-    -> private raw message in R2
-    -> Cloudflare Queue
-    -> Worker queue handler
-    -> normalized message in D1
-    -> authenticated /mcp endpoint
-    -> agent
+    -> Email Routing: sends one exact address to the Worker
+    -> R2: stores the original .eml file
+    -> Queue: schedules parsing
+    -> D1: stores message text, links, thread fields, and work status
+    -> /mcp: serves authenticated requests from an agent
 ```
 
-## MCP tools
+A Worker is Cloudflare code that runs on demand. R2 stores files, D1 stores structured records, and a Queue holds work until the Worker processes it.
 
-| Tool | Result |
+## What agents can do
+
+| MCP tool | Action |
 | --- | --- |
-| `list_messages` | Lists recent normalized messages, optionally by status. |
-| `get_message` | Reads one message by its internal UUID. |
-| `claim_next_message` | Atomically leases the oldest available message to the authenticated agent. |
-| `complete_message` | Completes a message leased by that same agent. |
-| `reply_to_message` | Builds RFC threading headers; sending remains off unless explicitly wired and enabled. |
+| `list_messages` | List recent messages, with an optional status filter. |
+| `get_message` | Read one message by its internal ID. |
+| `claim_next_message` | Reserve the oldest available message for the authenticated agent. |
+| `complete_message` | Mark a message complete when that agent holds its claim. |
+| `reply_to_message` | Prepare a reply and add `In-Reply-To` or `References` when the source message supplies the needed IDs. |
 
-Email is untrusted external input. MCP results repeat that warning so agents do not treat email text or links as instructions.
+### Claims
 
-## Quick start
+A claim lasts 30 minutes. Expiry makes the message eligible for another claim; it does not change the row on a timer. The first agent may still complete it until another agent takes the claim. The secret bearer token sent with the request identifies the agent; a client cannot choose its identity in the request.
 
-Requirements: Node.js 22.18 or a supported newer release, a Cloudflare account, an active R2 subscription, and a domain using Cloudflare DNS. The exact Node range is in `package.json`.
+### Treat email as untrusted data
+
+Email comes from people and systems outside your Cloudflare account. Every tool that returns email content labels the body, headers, and links as untrusted data rather than agent instructions.
+
+## Set up an inbox
+
+You need Node.js `^22.18.0` or `>=24.11.0`, a Cloudflare account, an active R2 subscription, and a domain that uses Cloudflare DNS. `package.json` is the authority for the Node.js range.
+
+Before changing mail records, check whether the domain receives mail through another provider. Cloudflare Email Routing changes the domain's MX records, which name the servers that receive its mail. Use a dedicated subdomain or another domain when the existing provider must keep receiving mail.
+
+Start by checking the repository:
 
 ```bash
 npm ci
@@ -52,47 +61,29 @@ npx wrangler whoami
 npm run check
 ```
 
-Before making DNS changes, check whether the domain already receives mail through another provider. Cloudflare Email Routing changes the domain's MX records and cannot share the same apex MX configuration with an external inbound provider.
+Then follow [Self-hosting on Cloudflare](docs/CLOUDFLARE_SETUP.md). It covers resource creation, credentials, mail routing, client configuration, and a real-message test.
 
-The complete resource-creation, deployment, DNS-safety, credential, Email Routing, and end-to-end verification sequence is in [Self-hosting on Cloudflare](docs/CLOUDFLARE_SETUP.md). Follow it from the beginning for a new account.
+## Connect an agent
 
-## Agent configuration
+The deployed endpoint uses Streamable HTTP, an MCP transport carried over ordinary HTTPS:
 
-Codex:
-
-```bash
-read -rsp 'Codex mailbox token: ' AGENTS_MAIL_CODEX_TOKEN
-echo
-export AGENTS_MAIL_CODEX_TOKEN
-codex mcp add agents_mail \
-  --url https://YOUR-WORKER.YOUR-SUBDOMAIN.workers.dev/mcp \
-  --bearer-token-env-var AGENTS_MAIL_CODEX_TOKEN
+```text
+https://YOUR-WORKER.YOUR-SUBDOMAIN.workers.dev/mcp
 ```
 
-Hermes:
+Each request needs one of the two bearer credentials stored as Worker secrets. Codex and Hermes are optional clients; this repository does not install them. Any compatible MCP client may use the endpoint.
 
-For Hermes's default profile, place the YAML in `~/.hermes/config.yaml` and provide `AGENTS_MAIL_HERMES_TOKEN` through an owner-readable `~/.hermes/.env` file.
-
-```yaml
-mcp_servers:
-  agents_mail:
-    url: "https://YOUR-WORKER.YOUR-SUBDOMAIN.workers.dev/mcp"
-    headers:
-      Authorization: "Bearer ${AGENTS_MAIL_HERMES_TOKEN}"
-    tools:
-      resources: false
-      prompts: false
-```
-
-Codex and Hermes are optional clients; this repository does not install either one. Restart an installed agent after changing its environment or MCP configuration. Any compatible Streamable HTTP MCP client can use the endpoint with one of the two bearer credentials.
+The setup guide contains configuration examples for [Codex and Hermes](docs/CLOUDFLARE_SETUP.md#11-connect-an-mcp-client).
 
 ## Cost
 
-At low message volume, this design is expected to fit within Cloudflare's free allowances: Email Routing is free, and Workers, D1, R2, and Queues each have free usage tiers. R2 is metered beyond its allowance rather than hard-capped at $0. Check the current [Workers](https://developers.cloudflare.com/workers/platform/pricing/), [D1](https://developers.cloudflare.com/d1/platform/pricing/), [R2](https://developers.cloudflare.com/r2/pricing/), and [Queues](https://developers.cloudflare.com/queues/platform/pricing/) pricing before deploying.
+Low message volume may remain inside Cloudflare's free quotas, but this is an estimate rather than a price guarantee. Message count, message size, retention, and changes to Cloudflare pricing affect the bill. R2 requires activation and charges for usage above its allowance.
 
-Outbound delivery is intentionally disabled. Cloudflare's arbitrary-recipient sending path requires a Workers Paid plan; see [Email Service pricing](https://developers.cloudflare.com/email-service/platform/pricing/).
+Check Cloudflare's current [Workers](https://developers.cloudflare.com/workers/platform/pricing/), [D1](https://developers.cloudflare.com/d1/platform/pricing/), [R2](https://developers.cloudflare.com/r2/pricing/), and [Queues](https://developers.cloudflare.com/queues/platform/pricing/) prices before deployment.
 
-## Development
+Inbound mail does not require Workers Paid. Sending to arbitrary recipients uses a separate paid path; this project leaves it off. See [Email Service pricing](https://developers.cloudflare.com/email-service/platform/pricing/).
+
+## Work on the project
 
 ```bash
 npm run typecheck
@@ -102,6 +93,6 @@ npm run dry-run
 npm run startup-check
 ```
 
-The integration suite runs the real Worker handlers against Wrangler's local D1, R2, Queue, and MCP implementations. It does not introduce a mock boundary.
+The integration tests call the real Worker handlers against Wrangler's local implementations of D1, R2, Queues, and MCP. They do not contact production services.
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for constraints and tradeoffs and [docs/OPERATIONS.md](docs/OPERATIONS.md) for the runbook.
+Read [Architecture](docs/ARCHITECTURE.md) for design limits and [Operations](docs/OPERATIONS.md) for diagnosis, credential rotation, retention, and deployment checks.
