@@ -68,15 +68,23 @@ function fromRow(row: MessageRow): StoredMessage {
 export async function listMessages(
   db: D1Database,
   status: MessageStatus | undefined,
-  limit: number
+  limit: number,
+  address?: string
 ): Promise<StoredMessage[]> {
-  const statement = status
-    ? db
-        .prepare(`SELECT ${columns} FROM messages WHERE status = ? ORDER BY received_at DESC LIMIT ?`)
-        .bind(status, limit)
-    : db
-        .prepare(`SELECT ${columns} FROM messages ORDER BY received_at DESC LIMIT ?`)
-        .bind(limit);
+  const filters: string[] = [];
+  const values: Array<string | number> = [];
+  if (status) {
+    filters.push("status = ?");
+    values.push(status);
+  }
+  if (address !== undefined) {
+    filters.push("envelope_to = ? COLLATE NOCASE");
+    values.push(address);
+  }
+  const where = filters.length > 0 ? `WHERE ${filters.join(" AND ")}` : "";
+  const statement = db
+    .prepare(`SELECT ${columns} FROM messages ${where} ORDER BY received_at DESC, id DESC LIMIT ?`)
+    .bind(...values, limit);
   const result = await statement.all<MessageRow>();
   return result.results.map(fromRow);
 }
@@ -95,25 +103,30 @@ export async function getMessage(
 export async function claimNextMessage(
   db: D1Database,
   actor: Actor,
+  address?: string,
   now = new Date(),
   leaseSeconds = 30 * 60
 ): Promise<StoredMessage | null> {
   const nowIso = now.toISOString();
   const expiresIso = new Date(now.getTime() + leaseSeconds * 1000).toISOString();
+  const addressFilter = address === undefined ? "" : "AND envelope_to = ? COLLATE NOCASE";
+  const values = [actor, nowIso, expiresIso, nowIso];
+  if (address !== undefined) values.push(address);
   const row = await db
     .prepare(
       `UPDATE messages
        SET status = 'claimed', claimed_by = ?, claimed_at = ?, claim_expires_at = ?
        WHERE id = (
          SELECT id FROM messages
-         WHERE status = 'new'
-            OR (status = 'claimed' AND claim_expires_at <= ?)
+         WHERE (status = 'new'
+            OR (status = 'claimed' AND claim_expires_at <= ?))
+           ${addressFilter}
          ORDER BY received_at ASC, id ASC
          LIMIT 1
        )
        RETURNING ${columns}`
     )
-    .bind(actor, nowIso, expiresIso, nowIso)
+    .bind(...values)
     .first<MessageRow>();
   return row ? fromRow(row) : null;
 }

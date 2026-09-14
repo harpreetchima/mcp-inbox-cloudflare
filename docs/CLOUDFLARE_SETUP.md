@@ -15,7 +15,7 @@ The examples use `agents@example.com`. Replace that address and domain with your
 | R2 bucket | `agents-mail-raw` | Stores each original email as an `.eml` file with its headers and attachments. Keep public access off. |
 | Queue | `agents-mail-ingest` | Schedules message parsing. |
 | Dead-letter Queue | `agents-mail-ingest-dlq` | Holds jobs that exhaust retries after processing exceptions. |
-| Email Routing rule | Your exact mailbox | Sends that address to the Worker. |
+| Email Routing rule | One per receiving address | Sends that address to the shared Worker. |
 
 A binding is the name code uses for a Cloudflare resource. Keep the bindings `DB`, `RAW_EMAILS`, and `INGEST_QUEUE`. Resource names may differ, but the names in Wrangler configuration and maintenance commands must match.
 
@@ -70,7 +70,7 @@ dig TXT example.com +short
 
 Do not remove records until you know what uses them. A domain should publish one SPF policy, a TXT record that names permitted sending services. If the current policy must remain, merge Cloudflare's entry into it instead of publishing a second `v=spf1` record. Read Cloudflare's [domain configuration](https://developers.cloudflare.com/email-service/configuration/domains/) page before accepting DNS changes.
 
-## 2. Check the project and choose the mailbox
+## 2. Check the project and choose the mailbox domain
 
 From the repository root:
 
@@ -82,14 +82,16 @@ npx wrangler --version
 
 The Node.js version must match `package.json`. Wrangler should report the version pinned in `package-lock.json`.
 
-Set one exact address in the Wrangler configuration file you chose:
+Set the exact receiving domain in the Wrangler configuration file you chose:
 
 ```jsonc
 "vars": {
-  "MAILBOX_ADDRESS": "agents@example.com",
+  "MAILBOX_DOMAIN": "example.com",
   "OUTBOUND_EMAIL_ENABLED": "false"
 }
 ```
+
+For addresses such as `agents@inbox.example.com`, use `inbox.example.com`. The domain check does not automatically include subdomains. Active addresses are managed through Email Routing rules in step 9.
 
 Keep `OUTBOUND_EMAIL_ENABLED` set to `false`. The current MCP server has no sender wired into it, so changing this flag or adding a binding would not activate delivery by itself.
 
@@ -156,13 +158,13 @@ The output should name the intended Worker, bindings, and resources.
 
 ## 5. Apply the D1 schema
 
-A migration is a versioned database change stored in `migrations/`. Apply the initial schema to the remote database:
+A migration is a versioned database change stored in `migrations/`. Apply all pending migrations to the remote database:
 
 ```bash
 npx wrangler d1 migrations apply DB --remote
 ```
 
-Review Wrangler's proposed migration before confirming it. The result should report that `0001_initial.sql` ran successfully.
+Review Wrangler's proposed migrations before confirming them. A fresh installation should report that both `0001_initial.sql` and `0002_multi_address.sql` ran successfully. An existing single-address installation should follow the [upgrade procedure](OPERATIONS.md#upgrade-from-a-single-address).
 
 ## 6. Deploy and check the Worker
 
@@ -281,9 +283,22 @@ After either domain path reports ready:
 3. Set **Action** to **Send to a Worker** and choose `agents-mail`.
 4. Save the rule and confirm it is active.
 5. Keep **Catch-all** off.
-6. Keep subaddressing off. The Worker accepts exact recipient equality, so `agents+tag@example.com` is rejected by this version.
+6. Keep automatic subaddressing off so plus-tagged addresses require their own explicit rules.
 
-The Worker checks the exact recipient again after Email Routing invokes it.
+The Worker checks the recipient's domain against `MAILBOX_DOMAIN`. It accepts any address routed to it on that domain. Exact rules define which addresses receive mail; turning on catch-all or subaddressing would broaden that set.
+
+### Add an address
+
+Once this version is deployed, adding an address on the same domain requires no application configuration change or redeployment:
+
+1. Create an exact rule, such as `research@example.com`, in the domain's **Routing Rules** tab.
+2. Select **Send to a Worker** and choose the existing `agents-mail` Worker.
+3. Save and enable the rule.
+4. Send a harmless test email and call `list_messages` with `{"address":"research@example.com"}`. Confirm the result's `envelopeTo` names the new address.
+
+Use `claim_next_message` with the same `address` to reserve work for that address. Matching ignores capitalization; omitting the filter includes all addresses. All authenticated agents retain access to the shared inbox.
+
+Disable the address's rule to stop new delivery through it. Stored messages remain available through the same filters.
 
 You may inspect the configuration from a terminal:
 
@@ -317,7 +332,7 @@ Inspect D1 from another terminal:
 
 ```bash
 npx wrangler d1 execute DB --remote --command \
-  "SELECT id, subject, status, received_at FROM messages ORDER BY received_at DESC LIMIT 5"
+  "SELECT id, envelope_to, subject, status, received_at FROM messages ORDER BY received_at DESC LIMIT 5"
 ```
 
 A complete test has four pieces of evidence:
@@ -394,20 +409,20 @@ The credential fixes claim ownership as `codex` or `hermes`. A client-supplied n
 
 ## Final check
 
-- [ ] `MAILBOX_ADDRESS` contains one exact address.
+- [ ] `MAILBOX_DOMAIN` contains the exact receiving domain.
 - [ ] `OUTBOUND_EMAIL_ENABLED` remains `false`.
 - [ ] Every Wrangler command used the intended complete configuration file.
 - [ ] `wrangler whoami` shows the account that owns the domain; a multi-account configuration contains that `account_id`.
 - [ ] D1, R2, the ingest Queue, and the dead-letter Queue exist.
-- [ ] D1 migration `0001_initial.sql` ran on the remote database.
+- [ ] D1 migrations `0001_initial.sql` and `0002_multi_address.sql` ran on the remote database.
 - [ ] `/health` returns `ok: true`.
 - [ ] Both Worker secret names exist and their values differ.
 - [ ] The manual R2 lifecycle rule exists.
 - [ ] Email Routing reports ready for the mailbox domain.
-- [ ] One exact-address rule sends to `agents-mail`.
+- [ ] Each intended address has an exact rule sending to `agents-mail`.
 - [ ] Catch-all and subaddressing are off.
 - [ ] One generic test message appears in D1 and R2.
-- [ ] An authenticated `list_messages` call returns that message.
+- [ ] An authenticated `list_messages` call filtered by `address` returns that message and its `envelopeTo`.
 
 Mail processing now runs on Cloudflare. A computer is needed only for deployments, maintenance, and agent access.
 

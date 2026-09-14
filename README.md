@@ -1,12 +1,12 @@
 # MCP Inbox for Cloudflare
 
-Email sent to one address becomes a private work queue that Codex, Hermes, or another software agent can read through Model Context Protocol (MCP). Cloudflare receives and stores each accepted message, then parses messages within the project's size limit.
+Email sent to addresses on your domain becomes a shared private work queue that Codex, Hermes, or another software agent can read through Model Context Protocol (MCP). Cloudflare receives and stores each accepted message, then parses messages within the project's size limit.
 
 You deploy this project in your own Cloudflare account. The inbox stays live without a local computer; an agent must run when you want it to act on mail. This is not a hosted service or webmail application.
 
 ## What you get
 
-- Email Routing sends one exact address to the Worker.
+- Email Routing sends each configured address to the same Worker. Add addresses by creating routing rules, without redeploying the application.
 - R2 stores each original email as an `.eml` file, including its headers and attachments; public bucket access should stay off.
 - D1 records structured message fields and work status.
 - A Cloudflare Queue schedules parsing after the original email has been stored.
@@ -19,7 +19,7 @@ Cloudflare exposes service settings and logs in its dashboard. This project does
 
 ```text
 Internet email
-    -> Email Routing: sends one exact address to the Worker
+    -> Email Routing: sends each configured address to the Worker
     -> R2: stores the original .eml file
     -> Queue: schedules parsing
     -> D1: stores message text, links, thread fields, and work status
@@ -32,11 +32,24 @@ A Worker is Cloudflare code that runs on demand. R2 stores files, D1 stores stru
 
 | MCP tool | Action |
 | --- | --- |
-| `list_messages` | List recent messages, with an optional status filter. |
+| `list_messages` | List recent messages, with optional `address` and `status` filters. |
 | `get_message` | Read one message by its internal ID. |
-| `claim_next_message` | Reserve the oldest available message for the authenticated agent. |
+| `claim_next_message` | Reserve the oldest available message for the authenticated agent, optionally filtered by `address`. |
 | `complete_message` | Mark a message complete when that agent holds its claim. |
-| `reply_to_message` | Prepare a reply and add `In-Reply-To` or `References` when the source message supplies the needed IDs. |
+| `reply_to_message` | Prepare a reply from the receiving address and add `In-Reply-To` or `References` when the source message supplies the needed IDs. |
+
+### Select an address
+
+Use a complete delivery address to select mail for one workflow:
+
+```text
+list_messages({ address: "research@example.com", status: "new" })
+claim_next_message({ address: "research@example.com" })
+```
+
+Address matching ignores capitalization and uses the actual delivery recipient, including for Bcc mail. Message summaries include that address as `envelopeTo`. Omitting `address` includes all addresses; no matches returns an empty result. All authenticated agents share access to all mail. A filter selects work and does not restrict permissions.
+
+To add another address, follow [Add an address](docs/CLOUDFLARE_SETUP.md#add-an-address). Existing deployments should first follow [Upgrade from a single address](docs/OPERATIONS.md#upgrade-from-a-single-address).
 
 ### Claims
 
