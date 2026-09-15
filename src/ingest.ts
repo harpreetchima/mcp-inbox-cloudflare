@@ -185,8 +185,11 @@ export async function handleIncomingEmail(
   message: ForwardableEmailMessage,
   env: Env
 ): Promise<void> {
-  if (message.to.toLowerCase() !== env.MAILBOX_ADDRESS.toLowerCase()) {
-    message.setReject("Unknown mailbox");
+  const domain = env.MAILBOX_DOMAIN?.trim().toLowerCase();
+  if (!domain) throw new Error("MAILBOX_DOMAIN is not configured");
+  const separator = message.to.lastIndexOf("@");
+  if (separator <= 0 || message.to.slice(separator + 1).toLowerCase() !== domain) {
+    message.setReject("Unknown mailbox domain");
     return;
   }
 

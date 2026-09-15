@@ -7,7 +7,7 @@
   "workers_dev": true,
   "preview_urls": false,
   "vars": {
-    "MAILBOX_ADDRESS": "agents@example.com",
+    "MAILBOX_DOMAIN": "example.com",
     "OUTBOUND_EMAIL_ENABLED": "false"
   },
   "observability": {
